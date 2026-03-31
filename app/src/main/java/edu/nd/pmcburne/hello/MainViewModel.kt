@@ -1,41 +1,64 @@
 package edu.nd.pmcburne.hello
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import edu.nd.pmcburne.hello.data.db.LocationMarker
+import edu.nd.pmcburne.hello.data.repo.AppGraph
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
-data class MainUIState(
-    val counterValue: Int
+data class UiState(
+    val selectedTag: String = "core",
+    val tags: List<String> = emptyList(),
+    val locations: List<LocationMarker> = emptyList(),
+    val error: String? = null
 )
 
-class MainViewModel(
-    val initialCounterValue: Int = 0
-) : ViewModel() {
-    private val _uiState = MutableStateFlow(MainUIState(initialCounterValue))
-    val uiState: StateFlow<MainUIState> = _uiState.asStateFlow()
+class MainViewModel(app: Application) : AndroidViewModel(app) {
 
-    fun incrementCounter() {
-        _uiState.update{ currentState ->
-            currentState.copy(counterValue = _uiState.value.counterValue + 1)
+    private val repo = AppGraph.createRepository(app.applicationContext)
+
+    private val selectedTag = MutableStateFlow("core")
+    private val error = MutableStateFlow<String?>(null)
+
+    private val tagsFlow = repo.observeTags().distinctUntilChanged()
+
+    private val effectiveTagFlow = combine(selectedTag, tagsFlow) { selected, tags ->
+        if (selected in tags) selected else (tags.firstOrNull() ?: selected)
+    }.distinctUntilChanged()
+
+    private val locationsFlow = effectiveTagFlow.flatMapLatest { tag ->
+        repo.observeLocationsByTag(tag)
+    }
+
+    val uiState: StateFlow<UiState> =
+        combine(tagsFlow, effectiveTagFlow, locationsFlow, error) { tags, tag, locations, err ->
+            UiState(
+                selectedTag = tag,
+                tags = tags,
+                locations = locations,
+                error = err
+            )
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), UiState())
+
+    init {
+        viewModelScope.launch {
+            try {
+                repo.syncFromApiOncePerLaunch()
+            } catch (t: Throwable) {
+                error.value = t.message ?: "Failed to load placemarks"
+            }
         }
     }
 
-    fun decrementCounter() {
-        _uiState.update{ currentState ->
-            currentState.copy(counterValue = _uiState.value.counterValue - 1)
-        }
+    fun setSelectedTag(tag: String) {
+        selectedTag.value = tag
     }
-
-    fun resetCounter() {
-        _uiState.update { currentState ->
-            currentState.copy(counterValue = 0)
-        }
-    }
-
-    val isDecrementEnabled: Boolean
-        get() = _uiState.value.counterValue > 0
-    val isResetEnabled: Boolean
-        get() = _uiState.value.counterValue > 0
 }
